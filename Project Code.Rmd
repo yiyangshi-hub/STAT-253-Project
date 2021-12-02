@@ -15,7 +15,7 @@ library(rpart.plot)
 library(tidymodels)
 library(cluster)
 tidymodels_prefer()
-flights <- read.csv("D:\\STAT 253\\HW\\FlightData.csv")
+flights <- read.csv("https://media.githubusercontent.com/media/yiyangshi-hub/STAT-253-Project/main/FlightData.csv")
 ```
 
 
