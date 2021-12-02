@@ -1,0 +1,235 @@
+---
+title: "HW4"
+output: html_document
+---
+
+```{r hw3_setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, eval=FALSE)
+```
+
+```{r}
+library(tidymodels)
+library(dplyr)
+library(ggplot2)
+library(rpart.plot)
+library(tidymodels)
+library(cluster)
+tidymodels_prefer()
+flights <- read.csv("D:\\STAT 253\\HW\\FlightData.csv")
+```
+
+
+```{r}
+flights_sub <- flights %>% 
+  filter(ARR_DELAY_NEW > 0) %>%
+  mutate(DEP_HOUR = round(as.numeric(DEP_TIME)/100)) %>%
+  mutate(ARR_HOUR = round(as.numeric(ARR_TIME)/100)) %>%
+  mutate(ARR_DELAY_LOG = log(ARR_DELAY_NEW)) %>%
+  mutate(WEATHER = (WEATHER_DELAY > 5) & !is.na(WEATHER_DELAY)) %>%
+  mutate(CARRIER = (CARRIER_DELAY > 5)&!is.na(CARRIER_DELAY)) %>%
+  mutate(NAS = (NAS_DELAY > 5)&!is.na(NAS_DELAY)) %>%
+  mutate(SECURITY = (SECURITY_DELAY > 5)&!is.na(SECURITY_DELAY)) %>%
+  mutate(LATE_AIRCRAFT = (LATE_AIRCRAFT_DELAY > 5) &!is.na(LATE_AIRCRAFT_DELAY)) %>%
+  mutate(arr_delay = ARR_DELAY_NEW > 10) %>% 
+  left_join(tibble(state.region,state.abb,state.division),by=c('ORIGIN_STATE_ABR' = 'state.abb')) %>%
+  rename('ORIGIN_REGION' = state.region) %>%
+  rename('ORIGIN_DIVISION' = state.division ) %>%  
+  left_join(tibble(state.region,state.abb,state.division),by=c('DEST_STATE_ABR' = 'state.abb')) %>%
+  rename('DEST_REGION' = state.region  ) %>%
+  rename('DEST_DIVISION' = state.division ) %>% 
+  mutate(arr_delay = factor(arr_delay),
+         YEAR = factor(YEAR),
+         MONTH = factor(MONTH),
+         DAY_OF_MONTH = factor(DAY_OF_MONTH),
+         DAY_OF_WEEK = factor(DAY_OF_WEEK),
+         ORIGIN = factor(ORIGIN),
+         ORIGIN_STATE_ABR = factor(ORIGIN_STATE_ABR),
+         DEST = factor(DEST),
+         DEST_STATE_ABR = factor(DEST_STATE_ABR),
+         WEATHER = factor(WEATHER),
+         CARRIER = factor(CARRIER),
+         NAS = factor(NAS),
+         SECURITY = factor(SECURITY),
+         LATE_AIRCRAFT = factor(LATE_AIRCRAFT),
+         ORIGIN_REGION = factor(ORIGIN_REGION),
+         ORIGIN_DIVISION = factor(ORIGIN_DIVISION),
+         DEST_REGION = factor(DEST_REGION),
+         DEST_DIVISION = factor(DEST_DIVISION),
+         OP_CARRIER = factor(OP_CARRIER),
+         ORIGIN_STATE_NM = factor(ORIGIN_STATE_NM),
+         DEST_STATE_NM = factor(DEST_STATE_NM)) %>%
+  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15) %>%
+  na.omit()
+```
+
+
+```{r}
+set.seed(123)
+flights_sub <- sample_n(flights_sub, 1000)
+```
+
+Reseach question: Where is the destination region for certain aircraft?
+
+# 01 - Decision Tree
+```{r}
+## Model Spec
+
+ct_spec <- decision_tree() %>%
+  set_engine(engine = 'rpart') %>%
+  set_args(cost_complexity = 0.008,
+           min_n = 5, 
+           tree_depth = NULL) %>% 
+  set_mode('classification')
+
+flight_rec <- recipe(arr_delay ~ DEP_HOUR+ARR_HOUR+WEATHER+SECURITY+DAY_OF_WEEK+NAS+LATE_AIRCRAFT+ ORIGIN_REGION+OP_CARRIER, data = flights_sub) %>%
+  #step_unknown(all_nominal_predictors()) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+flight_wf <- workflow() %>%
+  add_model(ct_spec) %>%
+  add_recipe(flight_rec)
+```
+
+
+```{r}
+## Fit the model
+fit_flight <- flight_wf %>%
+  fit(data = flights_sub)
+```
+
+
+```{r}
+fit_flight %>%
+  extract_fit_engine() %>%
+  rpart.plot()
+```
+
+
+```{r}
+set.seed(123)
+flight_fold <- vfold_cv(flights_sub, v=10)
+
+flight_wf_tune <- flight_wf %>%
+  update_model(ct_spec %>% set_args(cost_complexity = tune(), min_n = 5000))
+
+param_grid <- grid_regular(cost_complexity(range = c(-4, 1)), levels = 10) # try different values for levels
+
+tune_res <- tune_grid(
+  flight_wf_tune, 
+  resamples = flight_fold, 
+  grid = param_grid, 
+  metrics = metric_set(accuracy, sens, yardstick::spec, roc_auc)
+)
+
+autoplot(tune_res) + theme_classic()
+
+best_complexity <- select_best(tune_res, metric = 'accuracy')
+flight_wf_final <- finalize_workflow(flight_wf_tune, best_complexity)
+
+flight_final_fit <- fit(flight_wf_final, data = flights_sub) # fit final tuned model to training data
+
+flight_final_fit %>% extract_fit_engine() %>% rpart.plot()
+
+# CV Metrics for Tuned Classification Tree
+tune_res %>% 
+  collect_metrics() %>%
+  filter(cost_complexity == best_complexity %>% pull(cost_complexity))
+```
+
+
+
+
+
+
+# 02 - Random Forest
+
+```{r}
+rf_spec <- rand_forest() %>%
+  set_engine(engine = 'ranger') %>% 
+  set_args(mtry = NULL, # size of random subset of variables; default is floor(sqrt(ncol(x)))
+           trees = 50, # Number of bags
+           min_n = 5000,
+           probability = FALSE, # want hard predictions first
+           importance = 'impurity') %>% 
+  set_mode('classification') # change this for regression tree
+
+rf_spec
+
+
+flight_rf_wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(flight_rec)
+```
+
+
+```{r}
+set.seed(123)
+flight_rf_fit <- flight_rf_wf %>%
+  fit(data = flights_sub)
+
+flight_rf_fit
+```
+
+
+```{r}
+flight_rf_OOB_output <- tibble(
+  .pred_class = flight_rf_fit %>% extract_fit_engine() %>% pluck('predictions'),
+  DEST_REGION = flights_sub %>% pull(DEST_REGION))
+
+bag_metrics <- metric_set(sens, yardstick::spec, accuracy)
+
+flight_rf_OOB_output %>% 
+  bag_metrics(truth = DEST_REGION, estimate = .pred_class)
+```
+
+
+# Soft Prediction
+```{r}
+set.seed(123) #to get the same bootstrap samples, use same seed
+flight_rf_fit2 <- flight_rf_wf %>%
+  update_model(rf_spec %>% set_args(probability = TRUE)) %>%
+  fit(data = flights_sub)
+
+flight_rf_fit2
+```
+
+
+# Variable Importance
+```{r}
+library(vip) #install.packages('vip')
+
+flight_rf_fit %>% extract_fit_engine() %>% vip() #based on impurity
+
+flight_rf_wf %>% #based on permutation
+  update_model(rf_spec %>% set_args(importance = "permutation")) %>%
+  fit(data = flights_sub) %>% extract_fit_engine() %>% vip()
+```
+
+
+Information gained:
+We use a decision tree and a random forest to answer where is the destination of certain aircraft. From both methods, we can tell that ORIGIN_REGION_West has the most important predicting power as it is used to be the first split in the tree. The comparison between using a random forest and a decision tree is that, random forest raised the accuracy by 2%. We are thinking adding a logistic regression to answer our classification question despite using trees.
+
+
+
+
+# 03 K-means
+```{r}
+cust_cluster_sil <- function(k){
+    # Perform clustering
+    kclust <- pam(daisy(flights_sub), k = k)
+
+    # Return the average silhouette
+    return(kclust$silinfo$avg.width)
+}
+
+tibble(
+    k = 2:15,
+    tot_wc_ss = purrr::map_dbl(2:15, cust_cluster_sil)
+) %>% 
+    ggplot(aes(x = k, y = tot_wc_ss)) +
+    geom_point() + 
+    labs(x = "Number of clusters",y = 'Average Silhouette') + 
+    theme_classic()
+```
+
