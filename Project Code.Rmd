@@ -18,9 +18,9 @@ tidymodels_prefer()
 flights <- read.csv("https://media.githubusercontent.com/media/yiyangshi-hub/STAT-253-Project/main/FlightData.csv")
 ```
 
-
+# Data Clean up
 ```{r}
-flights_sub <- flights %>% 
+flights_sub_ols <- flights %>% 
   filter(ARR_DELAY_NEW > 0) %>%
   mutate(DEP_HOUR = round(as.numeric(DEP_TIME)/100)) %>%
   mutate(ARR_HOUR = round(as.numeric(ARR_TIME)/100)) %>%
@@ -37,8 +37,7 @@ flights_sub <- flights %>%
   left_join(tibble(state.region,state.abb,state.division),by=c('DEST_STATE_ABR' = 'state.abb')) %>%
   rename('DEST_REGION' = state.region  ) %>%
   rename('DEST_DIVISION' = state.division ) %>% 
-  mutate(arr_delay = factor(arr_delay),
-         YEAR = factor(YEAR),
+  mutate(YEAR = factor(YEAR),
          MONTH = factor(MONTH),
          DAY_OF_MONTH = factor(DAY_OF_MONTH),
          DAY_OF_WEEK = factor(DAY_OF_WEEK),
@@ -63,12 +62,71 @@ flights_sub <- flights %>%
 ```
 
 
+# OLS 
+
 ```{r}
-set.seed(123)
-flights_sub <- sample_n(flights_sub, 1000)
+# lm model
+lm_spec <- 
+    linear_reg() %>% 
+    set_engine("lm") %>% 
+    set_mode("regression")
+
+# Lasso Model Spec with tune
+lm_lasso_spec_tune <- 
+  linear_reg() %>%
+  set_args(mixture = 1, penalty = tune()) %>% ## mixture = 1 indicates Lasso
+  set_engine(engine = 'glmnet') %>% #note we are using a different engine
+  set_mode('regression') 
+
+# fit lm model with all the variables.
+mod_lm <- fit(lm_spec, 
+              ARR_DELAY_LOG ~.,
+              data = flights_sub_ols)
 ```
 
+
+
+
+
+
 Reseach question: Where is the destination region for certain aircraft?
+
+```{r}
+flights_sub <- flights %>% 
+  filter(ARR_DELAY_NEW > 0) %>%
+  mutate(DEP_HOUR = round(as.numeric(DEP_TIME)/100)) %>%
+  mutate(ARR_HOUR = round(as.numeric(ARR_TIME)/100)) %>%
+  mutate(ARR_DELAY_LOG = log(ARR_DELAY_NEW)) %>%
+  mutate(WEATHER = (WEATHER_DELAY > 5) & !is.na(WEATHER_DELAY)) %>%
+  mutate(CARRIER = (CARRIER_DELAY > 5)&!is.na(CARRIER_DELAY)) %>%
+  mutate(NAS = (NAS_DELAY > 5)&!is.na(NAS_DELAY)) %>%
+  mutate(SECURITY = (SECURITY_DELAY > 5)&!is.na(SECURITY_DELAY)) %>%
+  mutate(LATE_AIRCRAFT = (LATE_AIRCRAFT_DELAY > 5) &!is.na(LATE_AIRCRAFT_DELAY)) %>%
+  mutate(arr_delay = ARR_DELAY_NEW > 10) %>%
+  left_join(tibble(state.region,state.abb,state.division),by=c('ORIGIN_STATE_ABR' = 'state.abb')) %>%
+  rename('ORIGIN_REGION' = state.region) %>%
+  rename('ORIGIN_DIVISION' = state.division ) %>%  
+  left_join(tibble(state.region,state.abb,state.division),by=c('DEST_STATE_ABR' = 'state.abb')) %>%
+  rename('DEST_REGION' = state.region  ) %>%
+  rename('DEST_DIVISION' = state.division ) %>% 
+  # select(-...25,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15) %>%
+  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15, -ORIGIN_STATE_ABR, -ORIGIN_STATE_NM, -DEST_STATE_ABR, -DEST_STATE_NM, -DEP_TIME, -ARR_TIME, -YEAR, -MONTH, -DAY_OF_MONTH, -OP_CARRIER_FL_NUM) %>%
+  mutate(arr_delay = factor(arr_delay),
+         DAY_OF_WEEK = factor(DAY_OF_WEEK),
+         ORIGIN = factor(ORIGIN),
+         DEST = factor(DEST),
+         WEATHER = factor(WEATHER),
+         CARRIER = factor(CARRIER),
+         NAS = factor(NAS),
+         SECURITY = factor(SECURITY),
+         LATE_AIRCRAFT = factor(LATE_AIRCRAFT),
+         ORIGIN_REGION = factor(ORIGIN_REGION),
+         ORIGIN_DIVISION = factor(ORIGIN_DIVISION),
+         DEST_REGION = factor(DEST_REGION),
+         DEST_DIVISION = factor(DEST_DIVISION),
+         OP_CARRIER = factor(OP_CARRIER)) %>% 
+  na.omit()
+```
 
 # 01 - Decision Tree
 ```{r}
@@ -215,9 +273,13 @@ We use a decision tree and a random forest to answer where is the destination of
 
 # 03 K-means
 ```{r}
+set.seed(123)
+flights_sub_k <- flights_sub %>% 
+  sample_n(1000)
+
 cust_cluster_sil <- function(k){
     # Perform clustering
-    kclust <- pam(daisy(flights_sub), k = k)
+    kclust <- pam(daisy(flights_sub_k), k = k)
 
     # Return the average silhouette
     return(kclust$silinfo$avg.width)
@@ -231,5 +293,33 @@ tibble(
     geom_point() + 
     labs(x = "Number of clusters",y = 'Average Silhouette') + 
     theme_classic()
+```
+
+```{r}
+set.seed(123)
+kclust_k3_3vars <- kmeans(scale(daisy(flights_sub_k)), centers = 3)
+
+# flights_sub_k3 <- flights_sub_k %>%
+#     mutate(kclust_3_3vars = factor(kclust_k3_3vars$cluster))
+
+flights_sub_k3 <- flights_sub_k %>%
+  rename(Arrival_Delay=`arr_delay`, Region=`ORIGIN_REGION`)%>%
+  select(Arrival_Delay, Region, DISTANCE, DAY_OF_WEEK, DEP_HOUR)
+
+set.seed(123)
+kclust <- pam(daisy(flights_sub_k3), k = 3)
+kclust$cluster
+
+flights_sub_k3 <- flights_sub_k3 %>%
+    mutate(kclust_3 = factor(kclust$cluster))
+
+ggplot(flights_sub_k3, 
+       aes(fill= Arrival_Delay, x= Region)) +
+  geom_bar(position='fill') +
+  facet_wrap(~kclust_3)
+
+ggplot(flights_sub_k3, 
+       aes(x = DEP_HOUR,color = kclust_3))+
+  geom_density()
 ```
 
