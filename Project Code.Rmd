@@ -1,5 +1,5 @@
 ---
-title: "HW4"
+title: "Classification & Clustering"
 output: html_document
 ---
 
@@ -18,9 +18,12 @@ tidymodels_prefer()
 flights <- read.csv("https://media.githubusercontent.com/media/yiyangshi-hub/STAT-253-Project/main/FlightData.csv")
 ```
 
-# Data Clean up
+# Regression
+
+### Data cleanup
+
 ```{r}
-flights_sub_ols <- flights %>% 
+flights_sub <- flights %>% 
   filter(ARR_DELAY_NEW > 0) %>%
   mutate(DEP_HOUR = round(as.numeric(DEP_TIME)/100)) %>%
   mutate(ARR_HOUR = round(as.numeric(ARR_TIME)/100)) %>%
@@ -30,46 +33,97 @@ flights_sub_ols <- flights %>%
   mutate(NAS = (NAS_DELAY > 5)&!is.na(NAS_DELAY)) %>%
   mutate(SECURITY = (SECURITY_DELAY > 5)&!is.na(SECURITY_DELAY)) %>%
   mutate(LATE_AIRCRAFT = (LATE_AIRCRAFT_DELAY > 5) &!is.na(LATE_AIRCRAFT_DELAY)) %>%
-  mutate(arr_delay = ARR_DELAY_NEW > 10) %>% 
   left_join(tibble(state.region,state.abb,state.division),by=c('ORIGIN_STATE_ABR' = 'state.abb')) %>%
   rename('ORIGIN_REGION' = state.region) %>%
   rename('ORIGIN_DIVISION' = state.division ) %>%  
   left_join(tibble(state.region,state.abb,state.division),by=c('DEST_STATE_ABR' = 'state.abb')) %>%
   rename('DEST_REGION' = state.region  ) %>%
   rename('DEST_DIVISION' = state.division ) %>% 
-  mutate(YEAR = factor(YEAR),
-         MONTH = factor(MONTH),
-         DAY_OF_MONTH = factor(DAY_OF_MONTH),
-         DAY_OF_WEEK = factor(DAY_OF_WEEK),
+  # select(-...25,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15) %>%
+  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15, -ORIGIN_STATE_ABR, -ORIGIN_STATE_NM, -DEST_STATE_ABR, -DEST_STATE_NM, -DEP_TIME, -ARR_TIME, -YEAR, -MONTH, -DAY_OF_MONTH, -OP_CARRIER_FL_NUM, -ARR_DELAY_LOG, -ORIGIN_DIVISION, -DEST_DIVISION) %>%
+  mutate(DAY_OF_WEEK = factor(DAY_OF_WEEK),
          ORIGIN = factor(ORIGIN),
-         ORIGIN_STATE_ABR = factor(ORIGIN_STATE_ABR),
          DEST = factor(DEST),
-         DEST_STATE_ABR = factor(DEST_STATE_ABR),
          WEATHER = factor(WEATHER),
          CARRIER = factor(CARRIER),
          NAS = factor(NAS),
          SECURITY = factor(SECURITY),
          LATE_AIRCRAFT = factor(LATE_AIRCRAFT),
          ORIGIN_REGION = factor(ORIGIN_REGION),
-         ORIGIN_DIVISION = factor(ORIGIN_DIVISION),
          DEST_REGION = factor(DEST_REGION),
-         DEST_DIVISION = factor(DEST_DIVISION),
-         OP_CARRIER = factor(OP_CARRIER),
-         ORIGIN_STATE_NM = factor(ORIGIN_STATE_NM),
-         DEST_STATE_NM = factor(DEST_STATE_NM)) %>%
-  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15) %>%
+         OP_CARRIER = factor(OP_CARRIER)) %>% 
   na.omit()
 ```
 
 
-# OLS 
+```{r}
+flights_sub %>% 
+  distinct(OP_CARRIER)
+
+flights_sub %>% 
+  group_by(OP_CARRIER) %>% 
+  count()
+```
+
+## OLS
 
 ```{r}
-# lm model
 lm_spec <- 
     linear_reg() %>% 
-    set_engine("lm") %>% 
-    set_mode("regression")
+    set_engine(engine = 'lm') %>% 
+    set_mode('regression')
+
+modN <- fit(lm_spec, 
+    ARR_DELAY_NEW ~ .-DEP_DELAY_NEW,
+    data = flights_sub)
+
+modN_output <- modN %>% 
+    predict(new_data = flights_sub) %>% #this function maintains the row order of the new_data
+    bind_cols(flights_sub) %>%
+    mutate(resid = ARR_DELAY_NEW - .pred)
+
+ggplot(modN_output, aes(x = .pred, y = resid)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") +
+    labs(x = "Fitted values", y = "Residuals") +
+    theme_classic()
+
+modN_output %>%
+  rmse(truth = ARR_DELAY_NEW, estimate = .pred)
+modN_output %>%
+  mae(truth = ARR_DELAY_NEW, estimate = .pred)
+modN_output %>%
+  rsq(truth = ARR_DELAY_NEW, estimate = .pred)
+```
+
+```{r}
+ggplot(modN_output, aes(x = DAY_OF_WEEK, y = resid)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") +
+    labs(x = "Day of week", y = "Residuals") +
+    theme_classic()
+```
+
+
+
+
+
+## LASSO
+
+
+```{r}
+full_rec <- recipe(ARR_DELAY_NEW ~ ., data = flights_sub) %>%
+    step_nzv(all_predictors()) %>% # removes variables with the same value
+    step_normalize(all_numeric_predictors()) %>% # important standardization step for LASSO
+    step_dummy(all_nominal_predictors())  # creates indicator variables for categorical variables
+
+# Tune and fit a LASSO model to the data (with CV)
+set.seed(74)
+
+# Create CV folds
+data_cv5 <- vfold_cv(flights_sub, v = 5)
 
 # Lasso Model Spec with tune
 lm_lasso_spec_tune <- 
@@ -78,16 +132,92 @@ lm_lasso_spec_tune <-
   set_engine(engine = 'glmnet') %>% #note we are using a different engine
   set_mode('regression') 
 
-# fit lm model with all the variables.
-mod_lm <- fit(lm_spec, 
-              ARR_DELAY_LOG ~.,
-              data = flights_sub_ols)
+# Workflow (Recipe + Model)
+lasso_wf_tune <- workflow() %>% 
+  add_recipe(full_rec) %>%
+  add_model(lm_lasso_spec_tune) 
+
+# Tune Model (trying a variety of values of Lambda penalty)
+penalty_grid <- grid_regular(
+  penalty(range = c(-5, 2)), #log10 transformed 
+  levels = 20)
+
+tune_output <- tune_grid( # new function for tuning hyperparameters
+  lasso_wf_tune, # workflow
+  resamples = data_cv5, # cv folds
+  metrics = metric_set(rmse, mae),
+  grid = penalty_grid # penalty grid defined above
+)
+```
+
+
+```{r}
+autoplot(tune_output) + theme_classic()
+```
+
+```{r}
+best_penalty <- select_best(tune_output, metric = 'mae') # choose penalty value based on lowest mae
+best_se_penalty <- select_by_one_std_err(tune_output, metric = 'mae', desc(penalty)) # choose penalty value based on the largest penalty within 1 se of the lowest CV MAE
+
+best_se_penalty
+
+final_wf <- finalize_workflow(lasso_wf_tune, best_penalty) # incorporates penalty value to workflow
+final_wf_se <- finalize_workflow(lasso_wf_tune, best_se_penalty) # incorporates penalty value to workflow
+
+final_fit <- fit(final_wf, data = flights_sub)
+final_fit_se <- fit(final_wf_se, data = flights_sub)
 ```
 
 
 
+```{r}
+glmnet_output <- final_fit_se %>% extract_fit_parsnip() %>% pluck('fit') # way to get the original glmnet output
+
+lambdas <- glmnet_output$lambda
+coefs_lambdas <- 
+  coefficients(glmnet_output, s = lambdas )  %>% 
+  as.matrix() %>%  
+  t() %>% 
+  as.data.frame() %>% 
+  mutate(lambda = lambdas ) %>% 
+  select(lambda, everything(), -`(Intercept)`) %>% 
+  pivot_longer(cols = -lambda, 
+               names_to = "term", 
+               values_to = "coef") %>%
+  mutate(var = map_chr(stringr::str_split(term,"_"),~.[1]))
+
+coefs_lambdas %>%
+  ggplot(aes(x = lambda, y = coef, group = term, color = var)) +
+  geom_line() +
+  geom_vline(xintercept = best_se_penalty %>% pull(penalty), linetype = 'dashed') + 
+  theme_classic() + 
+  theme(legend.position = "bottom", legend.text=element_text(size=8))
+```
 
 
+```{r}
+glmnet_output <- final_fit_se %>% extract_fit_engine()
+    
+# Create a boolean matrix (predictors x lambdas) of variable exclusion
+bool_predictor_exclude <- glmnet_output$beta==0
+
+# Loop over each variable
+var_imp <- sapply(seq_len(nrow(bool_predictor_exclude)), function(row) {
+    this_coeff_path <- bool_predictor_exclude[row,]
+    if(sum(this_coeff_path) == ncol(bool_predictor_exclude)){ return(0)}else{
+    return(ncol(bool_predictor_exclude) - which.min(this_coeff_path) + 1)}
+})
+
+# Create a dataset of this information and sort
+var_imp_data <- tibble(
+    var_name = rownames(bool_predictor_exclude),
+    var_imp = var_imp
+)
+var_imp_data %>% arrange(desc(var_imp))
+```
+
+
+# Classification
 
 Reseach question: Where is the destination region for certain aircraft?
 
@@ -109,7 +239,6 @@ flights_sub <- flights %>%
   left_join(tibble(state.region,state.abb,state.division),by=c('DEST_STATE_ABR' = 'state.abb')) %>%
   rename('DEST_REGION' = state.region  ) %>%
   rename('DEST_DIVISION' = state.division ) %>% 
-  # select(-...25,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15) %>%
   select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15, -ORIGIN_STATE_ABR, -ORIGIN_STATE_NM, -DEST_STATE_ABR, -DEST_STATE_NM, -DEP_TIME, -ARR_TIME, -YEAR, -MONTH, -DAY_OF_MONTH, -OP_CARRIER_FL_NUM) %>%
   mutate(arr_delay = factor(arr_delay),
          DAY_OF_WEEK = factor(DAY_OF_WEEK),
@@ -128,7 +257,7 @@ flights_sub <- flights %>%
   na.omit()
 ```
 
-# 01 - Decision Tree
+## 01 - Decision Tree
 ```{r}
 ## Model Spec
 
@@ -200,7 +329,7 @@ tune_res %>%
 
 
 
-# 02 - Random Forest
+## 02 - Random Forest
 
 ```{r}
 rf_spec <- rand_forest() %>%
@@ -233,16 +362,16 @@ flight_rf_fit
 ```{r}
 flight_rf_OOB_output <- tibble(
   .pred_class = flight_rf_fit %>% extract_fit_engine() %>% pluck('predictions'),
-  DEST_REGION = flights_sub %>% pull(DEST_REGION))
+  arr_delay = flights_sub %>% pull(arr_delay))
 
 bag_metrics <- metric_set(sens, yardstick::spec, accuracy)
 
 flight_rf_OOB_output %>% 
-  bag_metrics(truth = DEST_REGION, estimate = .pred_class)
+  bag_metrics(truth = arr_delay, estimate = .pred_class)
 ```
 
 
-# Soft Prediction
+### Soft Prediction
 ```{r}
 set.seed(123) #to get the same bootstrap samples, use same seed
 flight_rf_fit2 <- flight_rf_wf %>%
@@ -253,7 +382,7 @@ flight_rf_fit2
 ```
 
 
-# Variable Importance
+### Variable Importance
 ```{r}
 library(vip) #install.packages('vip')
 
@@ -269,9 +398,9 @@ Information gained:
 We use a decision tree and a random forest to answer where is the destination of certain aircraft. From both methods, we can tell that ORIGIN_REGION_West has the most important predicting power as it is used to be the first split in the tree. The comparison between using a random forest and a decision tree is that, random forest raised the accuracy by 2%. We are thinking adding a logistic regression to answer our classification question despite using trees.
 
 
+# CLustering
 
-
-# 03 K-means
+## 03 K-means
 ```{r}
 set.seed(123)
 flights_sub_k <- flights_sub %>% 
