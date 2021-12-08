@@ -15,375 +15,17 @@ library(rpart.plot)
 library(tidymodels)
 library(cluster)
 library(kknn)
+library(vip)
 tidymodels_prefer()
 flights <- read.csv("https://media.githubusercontent.com/media/yiyangshi-hub/STAT-253-Project/main/FlightData.csv")
 ```
 
-```{r}
-flights_sub <- flights %>% 
-  filter(ARR_DELAY_NEW > 0) %>%
-  mutate(DEP_HOUR = round(as.numeric(DEP_TIME)/100)) %>%
-  mutate(ARR_HOUR = round(as.numeric(ARR_TIME)/100)) %>%
-  mutate(ARR_DELAY_LOG = log(ARR_DELAY_NEW)) %>%
-  mutate(WEATHER = (WEATHER_DELAY > 5) & !is.na(WEATHER_DELAY)) %>%
-  mutate(CARRIER = (CARRIER_DELAY > 5)&!is.na(CARRIER_DELAY)) %>%
-  mutate(NAS = (NAS_DELAY > 5)&!is.na(NAS_DELAY)) %>%
-  mutate(SECURITY = (SECURITY_DELAY > 5)&!is.na(SECURITY_DELAY)) %>%
-  mutate(LATE_AIRCRAFT = (LATE_AIRCRAFT_DELAY > 5) &!is.na(LATE_AIRCRAFT_DELAY)) %>%
-  left_join(tibble(state.region,state.abb,state.division),by=c('ORIGIN_STATE_ABR' = 'state.abb')) %>%
-  rename('ORIGIN_REGION' = state.region) %>%
-  rename('ORIGIN_DIVISION' = state.division ) %>%  
-  left_join(tibble(state.region,state.abb,state.division),by=c('DEST_STATE_ABR' = 'state.abb')) %>%
-  rename('DEST_REGION' = state.region  ) %>%
-  rename('DEST_DIVISION' = state.division ) %>% 
-  # select(-...25,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15) %>%
-  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15, -ORIGIN_STATE_ABR, -ORIGIN_STATE_NM, -DEST_STATE_ABR, -DEST_STATE_NM, -DEP_TIME, -ARR_TIME, -YEAR, -MONTH, -DAY_OF_MONTH, -OP_CARRIER_FL_NUM, -ARR_DELAY_LOG) %>%
-  mutate(DAY_OF_WEEK = factor(DAY_OF_WEEK),
-         ORIGIN = factor(ORIGIN),
-         DEST = factor(DEST),
-         WEATHER = factor(WEATHER),
-         CARRIER = factor(CARRIER),
-         NAS = factor(NAS),
-         SECURITY = factor(SECURITY),
-         LATE_AIRCRAFT = factor(LATE_AIRCRAFT),
-         ORIGIN_REGION = factor(ORIGIN_REGION),
-         ORIGIN_DIVISION = factor(ORIGIN_DIVISION),
-         DEST_REGION = factor(DEST_REGION),
-         DEST_DIVISION = factor(DEST_DIVISION),
-         OP_CARRIER = factor(OP_CARRIER)) %>% 
-  na.omit()
-```
-
-```{r}
-# If you do one train/test split 
-data_split <- initial_split(flights_sub, strata = "ARR_DELAY_NEW", prop = 0.75) #Create Train/Test set
-flights_train <- training(data_split) # Fit model to this
-flights_test  <- testing(data_split) # Don't use until evaluating final model
-```
-
-
-# Linear Regression
-```{r}
-lm_spec <- 
-  linear_reg() %>%  # Specify Model and Engine
-  set_engine( engine = 'lm') %>%
-  set_mode('regression') 
-
-# rmse	standard	68.3753704		
-# rsq	standard	0.2150813		
-# mae	standard	26.6094113	
-# lm_rec <- recipe(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + ORIGIN + DEST + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION, data = flights_train) %>%
-#   step_lincomb(all_numeric_predictors()) %>% # Specify Formula and Preprocessing Recipe
-#   step_zv(all_numeric_predictors()) %>%
-#   step_dummy(all_nominal_predictors())
-
-
-# rmse	standard	69.5591863		
-# rsq	standard	0.1791365		
-# mae	standard	25.6559957	
-lm_rec <- recipe(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION, data = flights_train) %>%
-  step_lincomb(all_numeric_predictors()) %>% # Specify Formula and Preprocessing Recipe
-  step_zv(all_numeric_predictors()) %>%
-  step_dummy(all_nominal_predictors())
-
-
-# rmse	standard	69.8332401		
-# rsq	standard	0.1812531		
-# mae	standard	25.9948794	
-# lm_rec <- recipe(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION + ORIGIN_DIVISION + DEST_DIVISION, data = flights_train) %>%
-#   step_lincomb(all_numeric_predictors()) %>% # Specify Formula and Preprocessing Recipe
-#   step_zv(all_numeric_predictors()) %>%
-#   step_dummy(all_nominal_predictors())
-
-
-train_prep <- lm_rec %>% 
-  prep() %>%
-  juice() # Pre-process Training Data
-
-
-flights_wf <- workflow() %>% # Create Workflow (Recipe + Model Spec)
-  add_recipe(lm_rec) %>%
-  add_model(lm_spec)  
-
-lm_fit_train <- flights_wf %>%
-  fit(data = flights_train)  # Fit Model to Training Data
-
-
-train_prep %>%
-  select(ARR_DELAY_NEW) %>%
-  bind_cols( predict(lm_fit_train, flights_train) ) %>% 
-  metrics(estimate = .pred, truth = ARR_DELAY_NEW)  # Calculate Training metrics
-
-lm_fit_train %>%
-  tidy() # Model Coefficients from Trained Model
-```
-
-
-```{r}
-library(dotwhisker)
-tidy(lm_fit_train) %>%  # Viz of Trained Model Coef
-  dwplot(dot_args = list(size = 2, color = "black"),
-         whisker_args = list(color = "black"),
-         vline = geom_vline(xintercept = 0, color = "grey50", linetype = 2))
-```
-
-
-```{r}
-flights_cv <- vfold_cv(flights_train, v = 10, strata = ARR_DELAY_NEW) # Create 10 Folds of Training Data for CV
-
-lm_fit_cv <- fit_resamples(flights_wf, # Fit Model to 10 Folds of Training Data
-              resamples = flights_cv,
-              metrics = metric_set(rmse, mae, rsq))
-
-lm_fit_cv %>% collect_metrics() # Evaluate Trained Model using CV
-
-lm_fit_test <- last_fit(flights_wf,
-         split = data_split) 
-
-lm_fit_test %>%
-  collect_metrics() #Evaluation on Test Data
-```
-
-
-```{r}
-library(vip)
-conflicted::conflict_prefer("vi", "vip")
-
-mod <- lm_fit_train %>% extract_fit_engine() 
-vi(mod, method = 'permute', target = 'ARR_DELAY_NEW', metric = 'rmse', train = train_prep, pred_wrapper = predict)
-vip(mod, method = 'permute', target = 'ARR_DELAY_NEW', metric = 'rmse', train = train_prep, pred_wrapper = predict) + theme_classic()
-```
-
-
-
-# Regularized Regression (LASSO)
-```{r}
-lm_lasso_spec <- 
-  linear_reg() %>%
-  set_args(mixture = 1, penalty = tune()) %>% 
-  set_engine(engine = 'glmnet') %>%
-  set_mode('regression') 
-
-# Update Workflow (Recipe + Model Spec)
-flights_wf <- flights_wf %>% 
-  update_model(lm_lasso_spec)  
-
-# Tune Model by Fitting Model to 10 Folds of Training Data
-lasso_fit_cv <- tune_grid(flights_wf, 
-              resamples = flights_cv,
-              grid = 10,
-              metrics = metric_set(rmse, mae, rsq))
-
-lasso_fit_cv %>% autoplot() + theme_classic() # Evaluate Trained Model using CV
-```
-
-```{r}
-# Select penalty value
-lasso_fit_cv %>% show_best(metric = 'rmse')
-best_penalty <- lasso_fit_cv %>% 
-  select_by_one_std_err(metric = 'rmse',desc(penalty))
-
-tuned_flights_wf <-  finalize_workflow(flights_wf,best_penalty)
-
-lm_lasso_spec <- tuned_flights_wf %>% pull_workflow_spec() # Save final tuned model spec
-
-# CV metrics
-lasso_fit_cv %>% 
-  collect_metrics() %>%
-  filter(penalty == (best_penalty %>% pull(penalty))) 
-
-# Fit Tuned Lasso Model to Training Data
-lasso_fit_train <- tuned_flights_wf %>%
-  fit(data = flights_train)  
-```
-
-```{r}
-# Training metrics
-train_prep %>%
-  select(ARR_DELAY_NEW) %>%
-  bind_cols( predict(lasso_fit_train, flights_train) ) %>% 
-  metrics(estimate = .pred, truth = ARR_DELAY_NEW)  
-
-# Model Coefficients from Trained Model
-lasso_fit_train %>%
-  tidy() 
-```
-
-
-```{r}
-# Var Importance
-glmnet_output <- lasso_fit_train %>% extract_fit_engine()
-    
-# Create a boolean matrix (predictors x lambdas) of variable exclusion
-bool_predictor_exclude <- glmnet_output$beta==0
-
-# Loop over each variable
-var_imp <- sapply(seq_len(nrow(bool_predictor_exclude)), function(row) {
-    this_coeff_path <- bool_predictor_exclude[row,]
-    if(sum(this_coeff_path) == ncol(bool_predictor_exclude)){ return(0)}else{
-    return(ncol(bool_predictor_exclude) - which.min(this_coeff_path) + 1)}
-})
-
-# Create a dataset of this information and sort
-var_imp_data <- tibble(
-    var_name = rownames(bool_predictor_exclude),
-    var_imp = var_imp
-)
-var_imp_data %>% arrange(desc(var_imp))
-```
-
-
-# Nearest Neighbors
-```{r}
-knn_spec <- 
-  nearest_neighbor() %>%
-  set_args(neighbors = tune()) %>%
-  set_engine(engine = 'kknn') %>%
-  set_mode('regression') 
-
-# Update Workflow (Recipe + Model Spec)
-flights_wf <- flights_wf %>% 
-  update_model(knn_spec)  
-
-# Tune Model by Fitting Model to 10 Folds of Training Data
-knn_fit_cv <- tune_grid(flights_wf, 
-              resamples = flights_cv,
-              grid = 20,
-              metrics = metric_set(rmse, mae, rsq))
-
-knn_fit_cv %>% autoplot() # Evaluate Trained Model using CV
-```
-
-```{r}
-knn_fit_cv %>% show_best(metric = 'rmse')
-
-best_neighbor <- knn_fit_cv %>% 
-  select_by_one_std_err(metric = 'rmse', neighbors)
-
-tuned_flights_wf <-  finalize_workflow(flights_wf, best_neighbor)
-
-knn_spec <- tuned_flights_wf %>% pull_workflow_spec() # Save final tuned model spec
-
-
-# CV Metrics
-knn_fit_cv %>%
-  collect_metrics() %>%
-  filter(neighbors == (best_neighbor %>% pull(neighbors)))
-
-
-# Fit KNN Model to Training Data
-knn_fit_train <- tuned_flights_wf %>%
-  fit(data = flights_train)  
-
-train_prep %>%
-  select(ARR_DELAY_NEW) %>%
-  bind_cols( predict(knn_fit_train, flights_train) ) %>% 
-  metrics(estimate = .pred, truth = ARR_DELAY_NEW)  # Training metrics
-
-```
-
-
-
-# GAM - Smoothing Splines
-```{r}
-gam_spec <- 
-  gen_additive_mod() %>%
-  set_engine(engine = 'mgcv') %>%
-  set_mode('regression') 
-
-
-fit_gam_model <- gam_spec %>% 
-  fit(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION, data = flights_train)
-
-
-# fit_gam_model <- gam_spec %>% 
-#   fit(Sale_Price ~ Lot_Area + Year_Built +  House_Style + s(Gr_Liv_Area, k = 15) + Fireplaces, data = ames_train) 
-
-# Summary: Parameter (linear) estimates and then Smooth Terms (H0: no relationship)
-fit_gam_model %>% pluck('fit') %>% summary() 
-
-# Diagnostics: Check to see if the number of knots is large enough (if p-value is low, increase number of knots)
-par(mfrow=c(2,2))
-fit_gam_model %>% pluck('fit') %>% mgcv::gam.check() 
-
-# Visualize Non-Linear Functions
-fit_gam_model %>% pluck('fit') %>% plot() 
-```
-
-
-# Regression Trees
-```{r}
-tree_rec <- recipe(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION, data = flights_train) %>%
-  step_zv(all_numeric_predictors())
-
-tree_spec <- 
-  decision_tree() %>%
-  set_engine(engine = 'rpart') %>%
-  set_mode('regression') 
-
-
-flights_wf <- flights_wf %>% # Update Workflow (Recipe + Model Spec)
-  update_recipe(tree_rec) %>%
-  update_model(tree_spec)  
-
-tree_fit_train <- flights_wf %>%
-  fit(data = flights_train)  # Fit Reg Tree Model to Training Data
-
-train_prep %>%
-  select(ARR_DELAY_NEW) %>%
-  bind_cols( predict(tree_fit_train, flights_train) ) %>% 
-  metrics(estimate = .pred, truth = ARR_DELAY_NEW)  # Training metrics
-
-```
-
-```{r}
-tree_fit_train %>% 
-  extract_fit_engine() %>% 
-  rpart.plot::rpart.plot(roundint = FALSE)
-
-tree_fit_cv <- flights_wf %>%
-  fit_resamples(resamples = flights_cv,
-                metrics = metric_set(rmse, mae, rsq))
-
-tree_fit_cv %>%
-  collect_metrics()
-```
-
-
-
-# Comparison of Methods
-```{r}
-wf_set <- workflow_set(
-  preproc = list(lm = lm_rec, tree = tree_rec),
-  models = list(lm = lm_spec, lasso = lm_lasso_spec, knn = knn_spec, tree = tree_spec),
-  cross = TRUE) %>% 
-   anti_join(tibble(wflow_id = c("lm_tree","spline_lasso", "spline_knn","spline_tree","tree_lm","tree_lasso","tree_knn")), 
-             by = "wflow_id")
-
-flights_wf_set <- wf_set %>%
-  workflow_map(
-    "fit_resamples", 
-    resamples = flights_cv, # Compare Methods via CV
-    metrics = metric_set(rmse, rsq, mae)) 
-    
-flights_wf_set %>% autoplot()
-flights_wf_set %>% rank_results(rank_metric = 'rmse')
-```
-
-
-
-
-
-
-
-
-
 # Classification
 
-Reseach question: Where is the destination region for certain aircraft?
+Reseach question: 
 
 ```{r}
-flights_sub <- flights %>% 
+flights_sub_c <- flights %>% 
   filter(ARR_DELAY_NEW > 0) %>%
   mutate(DEP_HOUR = round(as.numeric(DEP_TIME)/100)) %>%
   mutate(ARR_HOUR = round(as.numeric(ARR_TIME)/100)) %>%
@@ -400,7 +42,7 @@ flights_sub <- flights %>%
   left_join(tibble(state.region,state.abb,state.division),by=c('DEST_STATE_ABR' = 'state.abb')) %>%
   rename('DEST_REGION' = state.region  ) %>%
   rename('DEST_DIVISION' = state.division ) %>% 
-  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15, -ORIGIN_STATE_ABR, -ORIGIN_STATE_NM, -DEST_STATE_ABR, -DEST_STATE_NM, -DEP_TIME, -ARR_TIME, -YEAR, -MONTH, -DAY_OF_MONTH, -OP_CARRIER_FL_NUM) %>%
+  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15, -ORIGIN_STATE_ABR, -ORIGIN_STATE_NM, -DEST_STATE_ABR, -DEST_STATE_NM, -DEP_TIME, -ARR_TIME, -YEAR, -MONTH, -DAY_OF_MONTH, -OP_CARRIER_FL_NUM, -ORIGIN_DIVISION, -DEST_DIVISION, -ARR_DELAY_NEW, -ARR_DELAY_LOG) %>%
   mutate(arr_delay = factor(arr_delay),
          DAY_OF_WEEK = factor(DAY_OF_WEEK),
          ORIGIN = factor(ORIGIN),
@@ -411,83 +53,67 @@ flights_sub <- flights %>%
          SECURITY = factor(SECURITY),
          LATE_AIRCRAFT = factor(LATE_AIRCRAFT),
          ORIGIN_REGION = factor(ORIGIN_REGION),
-         ORIGIN_DIVISION = factor(ORIGIN_DIVISION),
          DEST_REGION = factor(DEST_REGION),
-         DEST_DIVISION = factor(DEST_DIVISION),
          OP_CARRIER = factor(OP_CARRIER)) %>% 
   na.omit()
 ```
 
 ## 01 - Decision Tree
 ```{r}
-## Model Spec
-
-ct_spec <- decision_tree() %>%
-  set_engine(engine = 'rpart') %>%
-  set_args(cost_complexity = 0.008,
-           min_n = 5, 
-           tree_depth = NULL) %>% 
-  set_mode('classification')
-
-flight_rec <- recipe(arr_delay ~ DEP_HOUR+ARR_HOUR+WEATHER+SECURITY+DAY_OF_WEEK+NAS+LATE_AIRCRAFT+ ORIGIN_REGION+OP_CARRIER, data = flights_sub) %>%
-  #step_unknown(all_nominal_predictors()) %>%
-  step_novel(all_nominal_predictors()) %>%
-  step_dummy(all_nominal_predictors())
-
-flight_wf <- workflow() %>%
-  add_model(ct_spec) %>%
-  add_recipe(flight_rec)
-```
-
-
-```{r}
-## Fit the model
-fit_flight <- flight_wf %>%
-  fit(data = flights_sub)
-```
-
-
-```{r}
-fit_flight %>%
-  extract_fit_engine() %>%
-  rpart.plot()
-```
-
-
-```{r}
 set.seed(123)
-flight_fold <- vfold_cv(flights_sub, v=10)
 
-flight_wf_tune <- flight_wf %>%
-  update_model(ct_spec %>% set_args(cost_complexity = tune(), min_n = 5000))
+flights_fold <- vfold_cv(flights_sub_c, v = 10)
 
-param_grid <- grid_regular(cost_complexity(range = c(-4, 1)), levels = 10) # try different values for levels
+flights_spec_tune <- decision_tree() %>%
+  set_engine(engine = 'rpart') %>%
+  set_args(cost_complexity = tune(),  
+           min_n = 2, 
+           tree_depth = NULL) %>% 
+  set_mode('classification') 
+
+flights_rec <- recipe(arr_delay ~ ., data = flights_sub_c)
+
+flights_wf_tune <- workflow() %>%
+  add_model(flights_spec_tune) %>%
+  add_recipe(flights_rec)
+
+param_grid <- grid_regular(cost_complexity(range = c(-5, 1)), levels = 10) 
 
 tune_res <- tune_grid(
-  flight_wf_tune, 
-  resamples = flight_fold, 
+  flights_wf_tune, 
+  resamples = flights_fold, 
   grid = param_grid, 
   metrics = metric_set(accuracy, sens, yardstick::spec, roc_auc)
 )
 
 autoplot(tune_res) + theme_classic()
+```
 
-best_complexity <- select_best(tune_res, metric = 'accuracy')
-flight_wf_final <- finalize_workflow(flight_wf_tune, best_complexity)
+```{r}
+best_complexity <- select_by_one_std_err(tune_res, 
+                                         metric ='accuracy',
+                                         desc(cost_complexity))
 
-flight_final_fit <- fit(flight_wf_final, data = flights_sub) # fit final tuned model to training data
+flights_wf_final <- finalize_workflow(flights_wf_tune, best_complexity)
 
-flight_final_fit %>% extract_fit_engine() %>% rpart.plot()
+flights_final_fit <- fit(flights_wf_final, data = flights_sub_c)
 
-# CV Metrics for Tuned Classification Tree
+
 tune_res %>% 
   collect_metrics() %>%
   filter(cost_complexity == best_complexity %>% pull(cost_complexity))
 ```
 
+```{r}
+tree_mod <- fit(
+    flights_wf_tune %>%
+      update_model(flights_spec_tune %>% 
+                     set_args(cost_complexity = .001)),
+    data = flights_sub_c
+)
 
-
-
+tree_mod %>% extract_fit_engine() %>% rpart.plot()
+```
 
 
 ## 02 - Random Forest
@@ -505,29 +131,29 @@ rf_spec <- rand_forest() %>%
 rf_spec
 
 
-flight_rf_wf <- workflow() %>%
+flights_rf_wf <- workflow() %>%
   add_model(rf_spec) %>%
-  add_recipe(flight_rec)
+  add_recipe(flights_rec)
 ```
 
 
 ```{r}
 set.seed(123)
-flight_rf_fit <- flight_rf_wf %>%
-  fit(data = flights_sub)
+flights_rf_fit <- flights_rf_wf %>%
+  fit(data = flights_sub_c)
 
-flight_rf_fit
+flights_rf_fit
 ```
 
 
 ```{r}
-flight_rf_OOB_output <- tibble(
-  .pred_class = flight_rf_fit %>% extract_fit_engine() %>% pluck('predictions'),
-  arr_delay = flights_sub %>% pull(arr_delay))
+flights_rf_OOB_output <- tibble(
+  .pred_class = flights_rf_fit %>% extract_fit_engine() %>% pluck('predictions'),
+  arr_delay = flights_sub_c %>% pull(arr_delay))
 
 bag_metrics <- metric_set(sens, yardstick::spec, accuracy)
 
-flight_rf_OOB_output %>% 
+flights_rf_OOB_output %>% 
   bag_metrics(truth = arr_delay, estimate = .pred_class)
 ```
 
@@ -535,29 +161,22 @@ flight_rf_OOB_output %>%
 ### Soft Prediction
 ```{r}
 set.seed(123) #to get the same bootstrap samples, use same seed
-flight_rf_fit2 <- flight_rf_wf %>%
+flights_rf_fit2 <- flights_rf_wf %>%
   update_model(rf_spec %>% set_args(probability = TRUE)) %>%
-  fit(data = flights_sub)
+  fit(data = flights_sub_c)
 
-flight_rf_fit2
+flights_rf_fit2
 ```
 
 
 ### Variable Importance
 ```{r}
-library(vip) #install.packages('vip')
+flights_rf_fit %>% extract_fit_engine() %>% vip() #based on impurity
 
-flight_rf_fit %>% extract_fit_engine() %>% vip() #based on impurity
-
-flight_rf_wf %>% #based on permutation
+flights_rf_wf %>% #based on permutation
   update_model(rf_spec %>% set_args(importance = "permutation")) %>%
-  fit(data = flights_sub) %>% extract_fit_engine() %>% vip()
+  fit(data = flights_sub_c) %>% extract_fit_engine() %>% vip()
 ```
-
-
-Information gained:
-We use a decision tree and a random forest to answer where is the destination of certain aircraft. From both methods, we can tell that ORIGIN_REGION_West has the most important predicting power as it is used to be the first split in the tree. The comparison between using a random forest and a decision tree is that, random forest raised the accuracy by 2%. We are thinking adding a logistic regression to answer our classification question despite using trees.
-
 
 # CLustering
 
