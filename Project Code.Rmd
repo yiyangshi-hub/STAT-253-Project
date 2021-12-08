@@ -14,13 +14,10 @@ library(ggplot2)
 library(rpart.plot)
 library(tidymodels)
 library(cluster)
+library(kknn)
 tidymodels_prefer()
 flights <- read.csv("https://media.githubusercontent.com/media/yiyangshi-hub/STAT-253-Project/main/FlightData.csv")
 ```
-
-# Regression
-
-### Data cleanup
 
 ```{r}
 flights_sub <- flights %>% 
@@ -40,7 +37,7 @@ flights_sub <- flights %>%
   rename('DEST_REGION' = state.region  ) %>%
   rename('DEST_DIVISION' = state.division ) %>% 
   # select(-...25,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15) %>%
-  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15, -ORIGIN_STATE_ABR, -ORIGIN_STATE_NM, -DEST_STATE_ABR, -DEST_STATE_NM, -DEP_TIME, -ARR_TIME, -YEAR, -MONTH, -DAY_OF_MONTH, -OP_CARRIER_FL_NUM, -ARR_DELAY_LOG, -ORIGIN_DIVISION, -DEST_DIVISION) %>%
+  select(-X,-(CARRIER_DELAY:LATE_AIRCRAFT_DELAY), -ARR_DEL15, -ORIGIN_STATE_ABR, -ORIGIN_STATE_NM, -DEST_STATE_ABR, -DEST_STATE_NM, -DEP_TIME, -ARR_TIME, -YEAR, -MONTH, -DAY_OF_MONTH, -OP_CARRIER_FL_NUM, -ARR_DELAY_LOG) %>%
   mutate(DAY_OF_WEEK = factor(DAY_OF_WEEK),
          ORIGIN = factor(ORIGIN),
          DEST = factor(DEST),
@@ -50,153 +47,172 @@ flights_sub <- flights %>%
          SECURITY = factor(SECURITY),
          LATE_AIRCRAFT = factor(LATE_AIRCRAFT),
          ORIGIN_REGION = factor(ORIGIN_REGION),
+         ORIGIN_DIVISION = factor(ORIGIN_DIVISION),
          DEST_REGION = factor(DEST_REGION),
+         DEST_DIVISION = factor(DEST_DIVISION),
          OP_CARRIER = factor(OP_CARRIER)) %>% 
   na.omit()
 ```
 
-
 ```{r}
-flights_sub %>% 
-  distinct(OP_CARRIER)
-
-flights_sub %>% 
-  group_by(OP_CARRIER) %>% 
-  count()
+# If you do one train/test split 
+data_split <- initial_split(flights_sub, strata = "ARR_DELAY_NEW", prop = 0.75) #Create Train/Test set
+flights_train <- training(data_split) # Fit model to this
+flights_test  <- testing(data_split) # Don't use until evaluating final model
 ```
 
-## OLS
 
+# Linear Regression
 ```{r}
 lm_spec <- 
-    linear_reg() %>% 
-    set_engine(engine = 'lm') %>% 
-    set_mode('regression')
-
-modN <- fit(lm_spec, 
-    ARR_DELAY_NEW ~ .-DEP_DELAY_NEW,
-    data = flights_sub)
-
-modN_output <- modN %>% 
-    predict(new_data = flights_sub) %>% #this function maintains the row order of the new_data
-    bind_cols(flights_sub) %>%
-    mutate(resid = ARR_DELAY_NEW - .pred)
-
-ggplot(modN_output, aes(x = .pred, y = resid)) +
-    geom_point() +
-    geom_smooth() +
-    geom_hline(yintercept = 0, color = "red") +
-    labs(x = "Fitted values", y = "Residuals") +
-    theme_classic()
-
-modN_output %>%
-  rmse(truth = ARR_DELAY_NEW, estimate = .pred)
-modN_output %>%
-  mae(truth = ARR_DELAY_NEW, estimate = .pred)
-modN_output %>%
-  rsq(truth = ARR_DELAY_NEW, estimate = .pred)
-```
-
-```{r}
-ggplot(modN_output, aes(x = DAY_OF_WEEK, y = resid)) +
-    geom_point() +
-    geom_smooth() +
-    geom_hline(yintercept = 0, color = "red") +
-    labs(x = "Day of week", y = "Residuals") +
-    theme_classic()
-```
-
-
-
-
-
-## LASSO
-
-
-```{r}
-full_rec <- recipe(ARR_DELAY_NEW ~ ., data = flights_sub) %>%
-    step_nzv(all_predictors()) %>% # removes variables with the same value
-    step_normalize(all_numeric_predictors()) %>% # important standardization step for LASSO
-    step_dummy(all_nominal_predictors())  # creates indicator variables for categorical variables
-
-# Tune and fit a LASSO model to the data (with CV)
-set.seed(74)
-
-# Create CV folds
-data_cv5 <- vfold_cv(flights_sub, v = 5)
-
-# Lasso Model Spec with tune
-lm_lasso_spec_tune <- 
-  linear_reg() %>%
-  set_args(mixture = 1, penalty = tune()) %>% ## mixture = 1 indicates Lasso
-  set_engine(engine = 'glmnet') %>% #note we are using a different engine
+  linear_reg() %>%  # Specify Model and Engine
+  set_engine( engine = 'lm') %>%
   set_mode('regression') 
 
-# Workflow (Recipe + Model)
-lasso_wf_tune <- workflow() %>% 
-  add_recipe(full_rec) %>%
-  add_model(lm_lasso_spec_tune) 
+# rmse	standard	68.3753704		
+# rsq	standard	0.2150813		
+# mae	standard	26.6094113	
+# lm_rec <- recipe(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + ORIGIN + DEST + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION, data = flights_train) %>%
+#   step_lincomb(all_numeric_predictors()) %>% # Specify Formula and Preprocessing Recipe
+#   step_zv(all_numeric_predictors()) %>%
+#   step_dummy(all_nominal_predictors())
 
-# Tune Model (trying a variety of values of Lambda penalty)
-penalty_grid <- grid_regular(
-  penalty(range = c(-5, 2)), #log10 transformed 
-  levels = 20)
 
-tune_output <- tune_grid( # new function for tuning hyperparameters
-  lasso_wf_tune, # workflow
-  resamples = data_cv5, # cv folds
-  metrics = metric_set(rmse, mae),
-  grid = penalty_grid # penalty grid defined above
-)
+# rmse	standard	69.5591863		
+# rsq	standard	0.1791365		
+# mae	standard	25.6559957	
+lm_rec <- recipe(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION, data = flights_train) %>%
+  step_lincomb(all_numeric_predictors()) %>% # Specify Formula and Preprocessing Recipe
+  step_zv(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+
+# rmse	standard	69.8332401		
+# rsq	standard	0.1812531		
+# mae	standard	25.9948794	
+# lm_rec <- recipe(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION + ORIGIN_DIVISION + DEST_DIVISION, data = flights_train) %>%
+#   step_lincomb(all_numeric_predictors()) %>% # Specify Formula and Preprocessing Recipe
+#   step_zv(all_numeric_predictors()) %>%
+#   step_dummy(all_nominal_predictors())
+
+
+train_prep <- lm_rec %>% 
+  prep() %>%
+  juice() # Pre-process Training Data
+
+
+flights_wf <- workflow() %>% # Create Workflow (Recipe + Model Spec)
+  add_recipe(lm_rec) %>%
+  add_model(lm_spec)  
+
+lm_fit_train <- flights_wf %>%
+  fit(data = flights_train)  # Fit Model to Training Data
+
+
+train_prep %>%
+  select(ARR_DELAY_NEW) %>%
+  bind_cols( predict(lm_fit_train, flights_train) ) %>% 
+  metrics(estimate = .pred, truth = ARR_DELAY_NEW)  # Calculate Training metrics
+
+lm_fit_train %>%
+  tidy() # Model Coefficients from Trained Model
 ```
 
 
 ```{r}
-autoplot(tune_output) + theme_classic()
-```
-
-```{r}
-best_penalty <- select_best(tune_output, metric = 'mae') # choose penalty value based on lowest mae
-best_se_penalty <- select_by_one_std_err(tune_output, metric = 'mae', desc(penalty)) # choose penalty value based on the largest penalty within 1 se of the lowest CV MAE
-
-best_se_penalty
-
-final_wf <- finalize_workflow(lasso_wf_tune, best_penalty) # incorporates penalty value to workflow
-final_wf_se <- finalize_workflow(lasso_wf_tune, best_se_penalty) # incorporates penalty value to workflow
-
-final_fit <- fit(final_wf, data = flights_sub)
-final_fit_se <- fit(final_wf_se, data = flights_sub)
-```
-
-
-
-```{r}
-glmnet_output <- final_fit_se %>% extract_fit_parsnip() %>% pluck('fit') # way to get the original glmnet output
-
-lambdas <- glmnet_output$lambda
-coefs_lambdas <- 
-  coefficients(glmnet_output, s = lambdas )  %>% 
-  as.matrix() %>%  
-  t() %>% 
-  as.data.frame() %>% 
-  mutate(lambda = lambdas ) %>% 
-  select(lambda, everything(), -`(Intercept)`) %>% 
-  pivot_longer(cols = -lambda, 
-               names_to = "term", 
-               values_to = "coef") %>%
-  mutate(var = map_chr(stringr::str_split(term,"_"),~.[1]))
-
-coefs_lambdas %>%
-  ggplot(aes(x = lambda, y = coef, group = term, color = var)) +
-  geom_line() +
-  geom_vline(xintercept = best_se_penalty %>% pull(penalty), linetype = 'dashed') + 
-  theme_classic() + 
-  theme(legend.position = "bottom", legend.text=element_text(size=8))
+library(dotwhisker)
+tidy(lm_fit_train) %>%  # Viz of Trained Model Coef
+  dwplot(dot_args = list(size = 2, color = "black"),
+         whisker_args = list(color = "black"),
+         vline = geom_vline(xintercept = 0, color = "grey50", linetype = 2))
 ```
 
 
 ```{r}
-glmnet_output <- final_fit_se %>% extract_fit_engine()
+flights_cv <- vfold_cv(flights_train, v = 10, strata = ARR_DELAY_NEW) # Create 10 Folds of Training Data for CV
+
+lm_fit_cv <- fit_resamples(flights_wf, # Fit Model to 10 Folds of Training Data
+              resamples = flights_cv,
+              metrics = metric_set(rmse, mae, rsq))
+
+lm_fit_cv %>% collect_metrics() # Evaluate Trained Model using CV
+
+lm_fit_test <- last_fit(flights_wf,
+         split = data_split) 
+
+lm_fit_test %>%
+  collect_metrics() #Evaluation on Test Data
+```
+
+
+```{r}
+library(vip)
+conflicted::conflict_prefer("vi", "vip")
+
+mod <- lm_fit_train %>% extract_fit_engine() 
+vi(mod, method = 'permute', target = 'ARR_DELAY_NEW', metric = 'rmse', train = train_prep, pred_wrapper = predict)
+vip(mod, method = 'permute', target = 'ARR_DELAY_NEW', metric = 'rmse', train = train_prep, pred_wrapper = predict) + theme_classic()
+```
+
+
+
+# Regularized Regression (LASSO)
+```{r}
+lm_lasso_spec <- 
+  linear_reg() %>%
+  set_args(mixture = 1, penalty = tune()) %>% 
+  set_engine(engine = 'glmnet') %>%
+  set_mode('regression') 
+
+# Update Workflow (Recipe + Model Spec)
+flights_wf <- flights_wf %>% 
+  update_model(lm_lasso_spec)  
+
+# Tune Model by Fitting Model to 10 Folds of Training Data
+lasso_fit_cv <- tune_grid(flights_wf, 
+              resamples = flights_cv,
+              grid = 10,
+              metrics = metric_set(rmse, mae, rsq))
+
+lasso_fit_cv %>% autoplot() + theme_classic() # Evaluate Trained Model using CV
+```
+
+```{r}
+# Select penalty value
+lasso_fit_cv %>% show_best(metric = 'rmse')
+best_penalty <- lasso_fit_cv %>% 
+  select_by_one_std_err(metric = 'rmse',desc(penalty))
+
+tuned_flights_wf <-  finalize_workflow(flights_wf,best_penalty)
+
+lm_lasso_spec <- tuned_flights_wf %>% pull_workflow_spec() # Save final tuned model spec
+
+# CV metrics
+lasso_fit_cv %>% 
+  collect_metrics() %>%
+  filter(penalty == (best_penalty %>% pull(penalty))) 
+
+# Fit Tuned Lasso Model to Training Data
+lasso_fit_train <- tuned_flights_wf %>%
+  fit(data = flights_train)  
+```
+
+```{r}
+# Training metrics
+train_prep %>%
+  select(ARR_DELAY_NEW) %>%
+  bind_cols( predict(lasso_fit_train, flights_train) ) %>% 
+  metrics(estimate = .pred, truth = ARR_DELAY_NEW)  
+
+# Model Coefficients from Trained Model
+lasso_fit_train %>%
+  tidy() 
+```
+
+
+```{r}
+# Var Importance
+glmnet_output <- lasso_fit_train %>% extract_fit_engine()
     
 # Create a boolean matrix (predictors x lambdas) of variable exclusion
 bool_predictor_exclude <- glmnet_output$beta==0
@@ -215,6 +231,151 @@ var_imp_data <- tibble(
 )
 var_imp_data %>% arrange(desc(var_imp))
 ```
+
+
+# Nearest Neighbors
+```{r}
+knn_spec <- 
+  nearest_neighbor() %>%
+  set_args(neighbors = tune()) %>%
+  set_engine(engine = 'kknn') %>%
+  set_mode('regression') 
+
+# Update Workflow (Recipe + Model Spec)
+flights_wf <- flights_wf %>% 
+  update_model(knn_spec)  
+
+# Tune Model by Fitting Model to 10 Folds of Training Data
+knn_fit_cv <- tune_grid(flights_wf, 
+              resamples = flights_cv,
+              grid = 20,
+              metrics = metric_set(rmse, mae, rsq))
+
+knn_fit_cv %>% autoplot() # Evaluate Trained Model using CV
+```
+
+```{r}
+knn_fit_cv %>% show_best(metric = 'rmse')
+
+best_neighbor <- knn_fit_cv %>% 
+  select_by_one_std_err(metric = 'rmse', neighbors)
+
+tuned_flights_wf <-  finalize_workflow(flights_wf, best_neighbor)
+
+knn_spec <- tuned_flights_wf %>% pull_workflow_spec() # Save final tuned model spec
+
+
+# CV Metrics
+knn_fit_cv %>%
+  collect_metrics() %>%
+  filter(neighbors == (best_neighbor %>% pull(neighbors)))
+
+
+# Fit KNN Model to Training Data
+knn_fit_train <- tuned_flights_wf %>%
+  fit(data = flights_train)  
+
+train_prep %>%
+  select(ARR_DELAY_NEW) %>%
+  bind_cols( predict(knn_fit_train, flights_train) ) %>% 
+  metrics(estimate = .pred, truth = ARR_DELAY_NEW)  # Training metrics
+
+```
+
+
+
+# GAM - Smoothing Splines
+```{r}
+gam_spec <- 
+  gen_additive_mod() %>%
+  set_engine(engine = 'mgcv') %>%
+  set_mode('regression') 
+
+
+fit_gam_model <- gam_spec %>% 
+  fit(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION, data = flights_train)
+
+
+# fit_gam_model <- gam_spec %>% 
+#   fit(Sale_Price ~ Lot_Area + Year_Built +  House_Style + s(Gr_Liv_Area, k = 15) + Fireplaces, data = ames_train) 
+
+# Summary: Parameter (linear) estimates and then Smooth Terms (H0: no relationship)
+fit_gam_model %>% pluck('fit') %>% summary() 
+
+# Diagnostics: Check to see if the number of knots is large enough (if p-value is low, increase number of knots)
+par(mfrow=c(2,2))
+fit_gam_model %>% pluck('fit') %>% mgcv::gam.check() 
+
+# Visualize Non-Linear Functions
+fit_gam_model %>% pluck('fit') %>% plot() 
+```
+
+
+# Regression Trees
+```{r}
+tree_rec <- recipe(ARR_DELAY_NEW ~ DAY_OF_WEEK + OP_CARRIER + DISTANCE + DEP_HOUR + ARR_HOUR + WEATHER + CARRIER + NAS + SECURITY + LATE_AIRCRAFT + ORIGIN_REGION + DEST_REGION, data = flights_train) %>%
+  step_zv(all_numeric_predictors())
+
+tree_spec <- 
+  decision_tree() %>%
+  set_engine(engine = 'rpart') %>%
+  set_mode('regression') 
+
+
+flights_wf <- flights_wf %>% # Update Workflow (Recipe + Model Spec)
+  update_recipe(tree_rec) %>%
+  update_model(tree_spec)  
+
+tree_fit_train <- flights_wf %>%
+  fit(data = flights_train)  # Fit Reg Tree Model to Training Data
+
+train_prep %>%
+  select(ARR_DELAY_NEW) %>%
+  bind_cols( predict(tree_fit_train, flights_train) ) %>% 
+  metrics(estimate = .pred, truth = ARR_DELAY_NEW)  # Training metrics
+
+```
+
+```{r}
+tree_fit_train %>% 
+  extract_fit_engine() %>% 
+  rpart.plot::rpart.plot(roundint = FALSE)
+
+tree_fit_cv <- flights_wf %>%
+  fit_resamples(resamples = flights_cv,
+                metrics = metric_set(rmse, mae, rsq))
+
+tree_fit_cv %>%
+  collect_metrics()
+```
+
+
+
+# Comparison of Methods
+```{r}
+wf_set <- workflow_set(
+  preproc = list(lm = lm_rec, tree = tree_rec),
+  models = list(lm = lm_spec, lasso = lm_lasso_spec, knn = knn_spec, tree = tree_spec),
+  cross = TRUE) %>% 
+   anti_join(tibble(wflow_id = c("lm_tree","spline_lasso", "spline_knn","spline_tree","tree_lm","tree_lasso","tree_knn")), 
+             by = "wflow_id")
+
+flights_wf_set <- wf_set %>%
+  workflow_map(
+    "fit_resamples", 
+    resamples = flights_cv, # Compare Methods via CV
+    metrics = metric_set(rmse, rsq, mae)) 
+    
+flights_wf_set %>% autoplot()
+flights_wf_set %>% rank_results(rank_metric = 'rmse')
+```
+
+
+
+
+
+
+
 
 
 # Classification
